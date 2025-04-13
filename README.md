@@ -1,12 +1,423 @@
-# 基于 BERT + CNN 的法律罪名预测系统
+# 基于 Electra + CNN 的法律罪名预测系统
 
 
+
+## 摘要
+
+针对中文法律文本罪名分类的复杂性，本研究提出了一种基于ELECTRA预训练模型与卷积神经网络（CNN）融合的法律罪名预测系统。
+
+本系统采用哈尔滨工业大学开源的预训练模型作为语义编码器，通过动态滑动窗口机制提取局部语义特征，构建包含全局最大池化与正则化技术的多级分类架构。
+
+实验采用真实司法文书数据集，通过双重数据清洗策略（多罪名样本剔除、特殊字符过滤）和动态罪名加载机制，在50万条训练样本上实现单轮训练效率优化。
+
+测试集评估显示，系统在盗窃、危险驾驶等高频罪名中达到98.45%的F1值，宏观准确率达88.47%，但在样本量低于10的68个低频罪名中出现严重识别失效。值得注意的是，模型通过犯罪事实文本特征学习，在毒品犯罪（F1=97.23%）和盗窃案件（Recall=98.27%）中展现出类法律专家水平的判别能力，但对复杂经济犯罪（如合同诈骗Precision=66.76%）和新型网络犯罪（如帮助信息网络犯罪活动罪F1=0）的泛化能力有限。
+
+本研究证实了预训练模型在法律文本表征中的有效性，同时揭示了司法人工智能面临的长尾分布困境，为后续研究提供了数据增强与迁移学习结合的改进方向。
+
+
+
+## 运行环境
+
+### GPU环境
+
+本项目使用`conda`创建python虚拟环境，使用GPU进行训练，CUDA和cuDNN版本[参考此网址](https://tensorflow.google.cn/install/source_windows?hl=en#gpu)
+
+| Version               | Python version | cuDNN | CUDA |
+| :-------------------- | :------------- | :---- | :--- |
+| tensorflow_gpu-2.10.0 | 3.8            | 8.1   | 11.2 |
+
+```
+NVIDIA GeForce RTX 4060 Laptop GPU
+
+驱动程序版本:	32.0.15.7270
+驱动程序日期:	2025/3/3
+DirectX 版本:	12 (FL 12.1)
+物理位置：	PCI 总线 1、设备 0、功能 0
+
+专用 GPU 内存	8.0 GB
+共享 GPU 内存	7.6 GB
+GPU 内存	15.6 GB
+```
+
+
+
+### 软件包依赖
+
+`requirements.txt`
+
+```
+tensorflow-gpu==2.10.0
+numpy==1.23.5
+transformers==4.30.0
+scikit-learn==1.0.2
+tqdm==4.65.0
+jieba==0.42.1
+Keras==2.10.0
+```
+
+
+
+## 项目实现原理
+
+### 流程图
+
+```
+【输入犯罪事实】
+      ↓
+预训练模型编码：把词变成向量
+      ↓
+CNN：滑动窗口提取词组特征
+      ↓
+GlobalMaxPooling：挑出最明显的特征
+      ↓
+Dense：映射成不同罪名的分数
+      ↓
+Softmax：转成概率，选出预测结果
+      ↓
+【输出罪名 】
+```
+
+
+
+### 一、数据清洗
+
+1. 清洗多重罪名数据
+
+   由于部分数据集中的accusation字段含有多个罪名，需要删除在json中对应的行，减小杂数据对模型的干扰。代码实现如下
+
+   ```python
+   import os
+   import json
+   
+   def clean_json_files(folder_path):
+       for root, dirs, files in os.walk(folder_path):
+           for file in files:
+               if file.endswith('.json'):
+                   file_path = os.path.join(root, file)
+                   try:
+                       with open(file_path, 'r', encoding='utf-8') as f:
+                           lines = f.readlines()  # 读取所有行（每行一个 JSON 对象）
+   
+                       valid_lines = []
+                       for line in lines:
+                           line = line.strip()  # 去除行首尾空格和换行符
+                           if not line:
+                               continue  # 跳过空行
+                           
+                           try:
+                               data = json.loads(line)  # 解析 JSON 数据
+                               accusation = data.get('meta', {}).get('accusation', [])
+                               
+                               if len(accusation) == 1:  # 仅保留 accusation 列表长度为 1 的行
+                                   valid_lines.append(line + '\n')  # 恢复换行符（原文件可能每行末尾有换行）
+                               
+                           except json.JSONDecodeError as e:
+                               print(f"解析 JSON 行时出错（文件: {file_path}, 行: {line[:50]}...）: {e}")
+                               continue  # 跳过解析失败的行
+   
+                       # 写回文件（覆盖原文件）
+                       with open(file_path, 'w', encoding='utf-8') as f:
+                           f.writelines(valid_lines)
+                       print(f"文件 {file_path} 处理完成，保留 {len(valid_lines)} 条有效数据")
+   
+                   except Exception as e:
+                       print(f"处理文件 {file_path} 时发生错误: {e}")
+   
+   if __name__ == "__main__":
+       # 请将此处替换为实际文件夹路径（例如："D:/json_files"）
+       target_folder = "temp/trainset"
+       clean_json_files(target_folder)
+   ```
+
+2. 对应accusation字段还含有形如“[]()”样式的文字，可在训练时去除。
+
+   `accu_clean = accu.translate(str.maketrans('', '', '[]（）【】'))`
+
+3. 网上给出的accu.txt有202个罪名，实际数据集可能不包含这些罪名，可在实际训练时候进行动态加载罪名。(见train.py的主函数)
+
+
+
+### 二、生成词向量
+
+选择开源的预训练模型，由[哈尔滨工业大学专门为中文法律文本训练的词向量生成模型](https://huggingface.co/hfl/chinese-legal-electra-base-discriminator/tree/main)
+
+```powershell
+git lfs install
+git clone https://huggingface.co/hfl/chinese-legal-electra-base-discriminator
+```
+
+
+
+### 三、神经网络层构建
+
+基本原理是使用卷积神经网络提取文本特征，然后使用GlobalMaxPooling聚合最显著的特征交给全连接层，全连接层把刚刚 CNN 提取到的“最显著特征”当作输入，交给神经网络里的决策层，最终全连接层把这些特征映射成不同罪名的可能性，交给Softmax层。Softmax层把所有罪名的分数，变成 **概率分布**，最后选出概率最大的罪名。
+
+
+
+### 四、训练模型
+
+考虑到时间紧迫和算力问题，最终只从200多万条数据集中选择了50万条，进行了1轮训练，小样本训练测试发现如果进行多轮训练模型发生了过拟合问题，精确率不断下降，不清楚为什么会发生这样的问题，最终决定进行一轮训练，平均精度达到80%，或许深入了解模型性能下降的原因后可以更高的提升精度。训练代码如下：
+
+`train.py`
+
+```python
+import json
+import os
+os.environ['TF_GPU_THREAD_MODE'] = 'gpu_private'
+os.environ['TF_ENABLE_CUBLAS_TENSOR_OP_MATH_FP32'] = '1'
+os.environ['TF_ENABLE_CUDNN_TENSOR_OP_MATH_FP32'] = '1'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+import sys
+import logging
+import numpy as np
+import tensorflow as tf
+from transformers import ElectraTokenizer, TFElectraModel
+from tensorflow.keras import layers, Model
+from tensorflow.keras import callbacks as keras_callbacks
+from sklearn.metrics import classification_report
+from sklearn.model_selection import train_test_split
+from tqdm.auto import tqdm
+
+# 配置参数 
+MAX_LENGTH = 256
+BATCH_SIZE = 10
+EPOCHS = 1
+LEARNING_RATE = 2e-5
+MODEL_SAVE_PATH = "electra_cnn_legal"
+DROPOUT_RATE = 0.3
+CLASSIFIER_UNITS = 384
+LOCAL_MODEL_PATH = "./hfl/chinese-legal-electra-base-disc"
+
+# GPU配置 
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    try:
+        tf.config.set_logical_device_configuration(
+            gpus[0],
+            [tf.config.LogicalDeviceConfiguration(memory_limit=7 * 1024)]
+        )
+        tf.config.experimental.set_memory_growth(gpus[0], True)
+    except RuntimeError as e:
+        logging.warning(f"GPU配置提示: {str(e)}")
+
+# 加载ELECTRA模型
+try:
+    tokenizer = ElectraTokenizer.from_pretrained(LOCAL_MODEL_PATH)
+    electra_model = TFElectraModel.from_pretrained(LOCAL_MODEL_PATH)
+    logging.info("ELECTRA模型加载成功")
+except Exception as e:
+    logging.error(f"模型加载失败: {str(e)}")
+    sys.exit(1)
+
+# 数据生成器
+class LegalDataGenerator(tf.keras.utils.Sequence):
+    def __init__(self, texts, labels, label_map, batch_size=BATCH_SIZE):
+        self.texts = texts
+        self.labels = np.array([label_map[l] for l in labels], dtype=np.int32)
+        self.batch_size = batch_size
+
+    def __len__(self):
+        return int(np.ceil(len(self.texts) / self.batch_size))
+
+    def __getitem__(self, idx):
+        batch_texts = self.texts[idx * self.batch_size:(idx + 1) * self.batch_size]
+        tokenized = tokenizer(
+            batch_texts,
+            max_length=MAX_LENGTH,
+            padding="max_length",
+            truncation=True,
+            return_tensors="tf"
+        )
+        return (tokenized["input_ids"], tokenized["attention_mask"]), self.labels[idx * self.batch_size:(idx + 1) * self.batch_size]
+
+# 自定义模型 
+class LegalClassifier(Model):
+    def __init__(self, num_classes, **kwargs):
+        super().__init__(**kwargs)
+        self.electra = electra_model
+        self.conv1 = layers.Conv1D(128, 3, activation='gelu', kernel_regularizer=tf.keras.regularizers.l2(1e-4))
+        self.bn = layers.BatchNormalization()
+        self.pool = layers.GlobalMaxPooling1D()
+        self.classifier = layers.Dense(num_classes, activation='softmax')
+
+    def call(self, inputs):
+        input_ids, attention_mask = inputs
+        outputs = self.electra(input_ids, attention_mask=attention_mask)
+        x = outputs.last_hidden_state
+        x = self.conv1(x)
+        x = self.bn(x)
+        x = self.pool(x)
+        return self.classifier(x)
+
+    def get_config(self):
+        return {"num_classes": self.classifier.units}
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
+# 加载数据集
+def load_dataset(data_dirs, label_map, min_samples_per_class=2):
+    texts, labels = [], []
+    label_counts = {label: 0 for label in label_map}
+
+    for data_dir in data_dirs:
+        if not os.path.isdir(data_dir):
+            continue
+        for root, _, files in os.walk(data_dir):
+            for file in files:
+                if not file.endswith('.json'):
+                    continue
+                try:
+                    with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
+                        for line in f:
+                            data = json.loads(line)
+                            accu = data['meta']['accusation'][0]
+                            accu_clean = accu.translate(str.maketrans('', '', '[]（）【】'))
+                            if accu_clean in label_map and 10 < len(data['fact']) < 1500:
+                                texts.append(data['fact'].strip())
+                                labels.append(accu_clean)
+                                label_counts[accu_clean] += 1
+                except Exception as e:
+                    logging.error(f"文件处理错误: {str(e)}")
+
+    # 过滤掉样本数不足的类别
+    texts = [text for i, text in enumerate(texts) if label_counts[labels[i]] >= min_samples_per_class]
+    labels = [label for label in labels if label_counts[label] >= min_samples_per_class]
+
+    logging.info(f"过滤后数据 - 总样本数: {len(texts)}")
+    return texts, labels
+
+# 主流程 
+def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[logging.FileHandler('training.log'), logging.StreamHandler()]
+    )
+
+    data_dirs = ["trainset"]
+    try:
+        # 第一步：初步读取全部罪名，构建计数器
+        all_texts, all_labels = [], []
+        label_counter = {}
+
+        for data_dir in data_dirs:
+            for root, _, files in os.walk(data_dir):
+                for file in files:
+                    if not file.endswith('.json'):
+                        continue
+                    try:
+                        with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
+                            for line in f:
+                                data = json.loads(line)
+                                fact = data.get("fact", "").strip()
+                                if not fact or not (10 < len(fact) < 1500):
+                                    continue
+                                accu_list = data["meta"].get("accusation", [])
+                                if not accu_list:
+                                    continue
+                                accu = accu_list[0]
+                                accu_clean = accu.translate(str.maketrans('', '', '[]（）【】'))
+                                all_texts.append(fact)
+                                all_labels.append(accu_clean)
+                                label_counter[accu_clean] = label_counter.get(accu_clean, 0) + 1
+                    except Exception as e:
+                        logging.error(f"数据读取错误: {str(e)}")
+
+        # 第二步：筛选出现次数 >= 2 的罪名，构建新的 label_to_id 映射
+        valid_labels = {label for label, count in label_counter.items() if count >= 2}
+        label_to_id = {label: idx for idx, label in enumerate(sorted(valid_labels))}
+        id_to_label = {idx: label for label, idx in label_to_id.items()}
+        logging.info(f"有效罪名共计: {len(label_to_id)} 类")
+
+        # 保存实际加载的罪名映射标签，方便模型预测时调用。
+        with open("accu_indeed.txt", "w", encoding="utf-8") as f:
+            for key in label_to_id:
+                f.write(key + "\n")
+        f.close()
+
+        # 第三步：再次过滤数据，只保留有效罪名的样本
+        texts = [t for i, t in enumerate(all_texts) if all_labels[i] in valid_labels]
+        labels = [l for l in all_labels if l in valid_labels]
+
+        # 第一层划分：train+val 与 test（测试集不参与任何训练过程）
+        train_val_texts, test_texts, train_val_labels, test_labels = train_test_split(
+            texts, labels, test_size=0.10, stratify=labels, random_state=42
+        )
+
+        # 第二层划分：从 train_val 中再划分出验证集
+        train_texts, val_texts, train_labels, val_labels = train_test_split(
+            train_val_texts, train_val_labels, test_size=0.15, stratify=train_val_labels, random_state=42
+        )
+
+        logging.info(f"训练样本: {len(train_texts)}, 验证样本: {len(val_texts)}, 测试样本: {len(test_texts)}")
+    except Exception as e:
+        logging.error(f"数据预处理失败: {str(e)}")
+        sys.exit(1)
+
+    # 模型构建和训练不变
+    model = LegalClassifier(len(label_to_id))
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(LEARNING_RATE),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"]
+    )
+
+    callbacks = [
+        keras_callbacks.EarlyStopping(patience=3, monitor='val_accuracy'),
+        keras_callbacks.ModelCheckpoint(MODEL_SAVE_PATH, save_best_only=True, save_format='tf')
+    ]
+
+    try:
+        model.fit(
+            LegalDataGenerator(train_texts, train_labels, label_to_id),
+            validation_data=LegalDataGenerator(val_texts, val_labels, label_to_id),
+            epochs=EPOCHS,
+            callbacks=callbacks,
+            verbose=1
+        )
+        tf.keras.models.save_model(model, MODEL_SAVE_PATH)
+    except Exception as e:
+        logging.error(f"训练失败: {str(e)}")
+        sys.exit(1)
+
+    # 模型评估部分
+    try:
+        model = tf.keras.models.load_model(
+            MODEL_SAVE_PATH,
+            custom_objects={"LegalClassifier": LegalClassifier}
+        )
+        y_true, y_pred = [], []
+        test_gen = LegalDataGenerator(test_texts, test_labels, label_to_id)
+
+        for (inputs, labels) in test_gen:
+            preds = model.predict(inputs)
+            y_true.extend(labels)
+            y_pred.extend(np.argmax(preds, axis=1))
+
+        print(classification_report(
+            y_true, y_pred,
+            target_names=[id_to_label[i] for i in sorted(set(y_true))],  # ✅ 只评估实际出现过的类别
+            digits=4
+        ))
+    except Exception as e:
+        logging.error(f"评估失败: {str(e)}")
+
+if __name__ == "__main__":
+    main()
+
+```
+
+
+
+## 训练结果评估报告
 
 ### 法律罪名分类模型测试集评估报告
 
----
+**一、整体性能概览**
 
-#### **一、整体性能概览**
 | 指标          | 数值    | 解释说明                                                                 |
 |---------------|--------|--------------------------------------------------------------------------|
 | 测试集准确率   | 88.47% | 模型对大部分样本的罪名分类正确，但受高频类别主导                         |
@@ -15,11 +426,13 @@
 
 ---
 
-#### **二、类别分布特征分析**
+**二、类别分布特征分析**
+
 1. **极端长尾分布**
+   
    - **头部类别**：前5%的罪名（如`盗窃`、`危险驾驶`）占据总样本量的42.3%  
    - **尾部类别**：68个罪名（占类别总数的39.5%）样本量 ≤ 10，其中23个类别样本量=1
-
+   
 2. **高频与低频类别对比**
    | 类别类型 | 平均样本量 | 平均F1  | 典型罪名案例                     |
    |----------|------------|---------|----------------------------------|
@@ -29,7 +442,8 @@
 
 ---
 
-#### **三、关键罪名表现详析**
+**三、关键罪名表现详析**
+
 1. **高频罪名优秀案例**
    | 罪名             | 样本量 | Precision | Recall | F1   |
    |------------------|--------|-----------|--------|------|
@@ -56,7 +470,8 @@
 
 ---
 
-#### **四、数据质量风险提示**
+**四、数据质量风险提示**
+
 1. **样本过滤缺陷**  
    - 测试集中包含**41个罪名**的样本量 ≤ 3，违反机器学习最小样本原则  
    - 例如`组织、领导、参加黑社会性质组织`（1样本）在测试集出现，导致评估指标失真
@@ -69,7 +484,8 @@
 
 ---
 
-#### **五、法律场景关键缺陷**
+**五、法律场景关键缺陷**
+
 1. **重大罪名漏检风险**  
    - `故意杀人`（325样本）F1仅0.7457，对量刑关键罪名需更高召回率  
    - `受贿`（346样本）精确率0.8116，存在将其他经济犯罪误判为受贿的风险
@@ -80,7 +496,8 @@
 
 ---
 
-#### **六、评估结论**
+**六、评估结论**
+
 1. **优势领域**  
    - 高频罪名（样本量 > 500）分类准确率稳定在90%以上  
    - 特定罪名（如`盗窃`、`危险驾驶`）达到准生产环境可用水平
@@ -93,10 +510,9 @@
    - 当前模型适用于高频罪名的批量处理，但**不满足司法裁判场景的全面性要求**  
    - 对新型犯罪（低频罪名）和复合型犯罪（特征交叉罪名）识别能力有限
 
----
 
-（本报告仅基于提供的测试集数据，实际部署需结合业务场景进行专项优化）
-## 模型在测试集上的表现表格
+
+### 模型在测试集上的表现表格汇总
 
 |                             类别                            |   precision |    recall |  f1-score |   support |
 |------------------------------------------------------------|------------|-----------|-----------|-----------|
@@ -293,3 +709,126 @@
 | ​**accuracy**​                                               |             |           | ​**0.8847**|     39317 |
 | ​**macro avg**​                                              |     0.6260 |    0.5928 |    0.5890 |     39317 |
 | ​**weighted avg**​                                           |     0.8798 |    0.8847 |    0.8772 |     39317 |
+
+
+
+## 实际测试
+
+使用代码
+
+```python
+import os
+import json
+import numpy as np
+import tensorflow as tf
+from transformers import ElectraTokenizer, TFElectraModel
+from tensorflow.keras import layers, Model
+
+# 配置
+MAX_LENGTH = 256
+MODEL_SAVE_PATH = "electra_cnn_legal"
+LOCAL_MODEL_PATH = "./hfl/chinese-legal-electra-base-disc"
+
+# 加载 tokenizer 和 electra 模型
+tokenizer = ElectraTokenizer.from_pretrained(LOCAL_MODEL_PATH)
+electra_model = TFElectraModel.from_pretrained(LOCAL_MODEL_PATH)
+
+# 定义模型类
+class LegalClassifier(Model):
+    def __init__(self, num_classes, **kwargs):
+        super().__init__(**kwargs)
+        self.electra = electra_model
+        self.conv1 = layers.Conv1D(128, 3, activation='gelu', kernel_regularizer=tf.keras.regularizers.l2(1e-4))
+        self.bn = layers.BatchNormalization()
+        self.pool = layers.GlobalMaxPooling1D()
+        self.classifier = layers.Dense(num_classes, activation='softmax')
+
+    def call(self, inputs):
+        input_ids, attention_mask = inputs
+        outputs = self.electra(input_ids, attention_mask=attention_mask)
+        x = outputs.last_hidden_state
+        x = self.conv1(x)
+        x = self.bn(x)
+        x = self.pool(x)
+        return self.classifier(x)
+
+    def get_config(self):
+        return {"num_classes": self.classifier.units}
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
+# 加载 label 映射字典
+with open("accu.txt", encoding="utf-8") as f:
+    labels = [line.strip() for line in f.readlines()]
+label_to_id = {label: i for i, label in enumerate(labels)}
+id_to_label = {i: label for label, i in label_to_id.items()}
+
+# 加载模型
+model = tf.keras.models.load_model(
+    MODEL_SAVE_PATH,
+    custom_objects={"LegalClassifier": LegalClassifier}
+)
+
+# 预测函数
+def predict_accusation(text):
+    if not text.strip():
+        return "❗️输入文本为空"
+
+    tokens = tokenizer(
+        text,
+        max_length=MAX_LENGTH,
+        truncation=True,
+        padding='max_length',
+        return_tensors='tf'
+    )
+    input_ids = tokens["input_ids"]
+    attention_mask = tokens["attention_mask"]
+
+    preds = model.predict((input_ids, attention_mask))
+    pred_id = np.argmax(preds, axis=1)[0]
+    return id_to_label[pred_id]
+
+# 无限循环预测
+if __name__ == "__main__":
+    print("🔍 犯罪事实罪名预测系统")
+    print("输入犯罪事实文本，输入 'Stop' 可退出。")
+    while True:
+        fact = input("\n请输入犯罪事实：\n>>> ")
+        if fact.strip().lower() == "stop":
+            print("👋 已退出预测系统。")
+            break
+        result = predict_accusation(fact)
+        print(f"✅ 预测罪名：{result}")
+
+```
+
+### 效果图
+
+![在·](assets/%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_20250413144050.png)
+
+
+
+![微信图片_20250413144235](assets/%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_20250413144235.png)
+
+
+
+![微信图片_20250413144242](assets/%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_20250413144242.png)
+
+
+
+![微信图片_20250413145119](assets/%E5%BE%AE%E4%BF%A1%E5%9B%BE%E7%89%87_20250413145119.png)
+
+
+
+
+
+## 参考文献
+
+[基于BERT词向量和Attention-CNN的智能司法研究-学位-万方数据知识服务平台](https://d.wanfangdata.com.cn/thesis/D01697595)
+
+[使用GPU运行TensorFlow模型的教程_tensorflow gpu-CSDN博客](https://blog.csdn.net/m0_71417856/article/details/136298172)
+
+[Build from source on Windows  | TensorFlow](https://tensorflow.google.cn/install/source_windows?hl=en#gpu)
+
