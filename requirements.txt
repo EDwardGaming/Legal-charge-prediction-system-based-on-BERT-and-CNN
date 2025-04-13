@@ -1,0 +1,7 @@
+tensorflow-gpu==2.10.0
+numpy==1.23.5
+transformers==4.30.0
+scikit-learn==1.0.2
+tqdm==4.65.0
+jieba==0.42.1
+Keras==2.10.0
