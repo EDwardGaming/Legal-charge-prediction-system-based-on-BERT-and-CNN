@@ -841,11 +841,26 @@ if __name__ == "__main__":
 
 
 
-## 参考文献
+## 附：参考文献
 
 [基于BERT词向量和Attention-CNN的智能司法研究-学位-万方数据知识服务平台](https://d.wanfangdata.com.cn/thesis/D01697595)
 
 [使用GPU运行TensorFlow模型的教程_tensorflow gpu-CSDN博客](https://blog.csdn.net/m0_71417856/article/details/136298172)
 
 [Build from source on Windows  | TensorFlow](https://tensorflow.google.cn/install/source_windows?hl=en#gpu)
+
+
+
+## 附：大文件上传问题
+
+由于100MB文件限制，删除以下文件
+
+```powershell
+git rm --cached "E:\education\ML\realProject\SelectionFromJingYunSUn\classcreme\hfl\chinese-legal-electra-base-disc\pytorch_model.bin"
+git rm --cached "E:\education\ML\realProject\SelectionFromJingYunSUn\classcreme\hfl\chinese-legal-electra-base-disc\tf_model.h5"
+git rm --cached "E:\education\ML\realProject\SelectionFromJingYunSUn\classcreme\trainset\train.json"
+git rm --cached "E:\education\ML\realProject\SelectionFromJingYunSUn\classcreme\trainset\test.json"
+git rm --cached "E:\education\ML\realProject\SelectionFromJingYunSUn\classcreme\trainset\data_train.json"
+git rm --cached "E:\education\ML\realProject\SelectionFromJingYunSUn\classcreme\electra_cnn_legal\variables\variables.data-00000-of-00001"
+```
 
