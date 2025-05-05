@@ -1,4 +1,4 @@
-# 基于 Electra + CNN 的法律罪名预测系统
+# 基于 Electra + CNN 的法律合规预测系统
 
 
 
